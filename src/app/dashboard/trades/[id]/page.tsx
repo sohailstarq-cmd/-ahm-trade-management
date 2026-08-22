@@ -12,7 +12,7 @@ import {
   TRADE_STATUS_ORDER,
   TRADE_STATUS_SIDE_STATES,
 } from "../actions";
-import { recordPayment, computeOverallPaymentStatus } from "../../payments/actions";
+import { recordPayment } from "../../payments/actions"; import { computeOverallPaymentStatus } from "@/lib/payment-status";
 import { upsertBrokerageTerms, generateBrokerageInvoice, markBrokerageInvoicePaid } from "../../brokerage/actions";
 import { createDispute, updateDispute } from "../../disputes/actions";
 
