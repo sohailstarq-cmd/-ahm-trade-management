@@ -1,0 +1,678 @@
+// AL HAMZA MERIDIAN — TRADE MANAGEMENT SYSTEM
+// Phase 1 schema: auth, roles, permissions, company settings, audit/security.
+// Later phases add: buyers, sellers, products, trades, shipments, documents,
+// payments, brokerages, disputes, emails — see /docs/AHM-TMS-Phase1-Architecture.md
+// for the full planned schema. Nothing from later phases is created yet on purpose:
+// Phase 1 stops at foundation, per the build plan.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Local dev defaults to SQLite so this runs with zero external setup.
+  // For production, switch provider to "postgresql" and set DATABASE_URL
+  // to a real Postgres connection string — see README "Going to production".
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  OWNER
+  TRADER
+  OPERATIONS
+  FINANCE
+  EMPLOYEE
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        RoleName @unique
+  description String?
+  users       User[]
+  defaults    RolePermission[]
+}
+
+// Master list of permission codes. Do NOT hard-code permission checks against
+// role names in application code — always check against this table (role
+// defaults + per-user overrides), so Owner can reconfigure access without a
+// code change.
+model Permission {
+  id          String @id @default(cuid())
+  code        String @unique // e.g. "view_margin", "record_payment", "manage_users"
+  description String
+  roleDefaults RolePermission[]
+  userOverrides UserPermission[]
+}
+
+model RolePermission {
+  id           String     @id @default(cuid())
+  role         Role       @relation(fields: [roleId], references: [id])
+  roleId       String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  permissionId String
+  granted      Boolean    @default(true)
+
+  @@unique([roleId, permissionId])
+}
+
+// Per-user overrides layered on top of role defaults. Owner sets these via
+// Users & Permissions — never edited by employees themselves.
+model UserPermission {
+  id           String     @id @default(cuid())
+  user         User       @relation(fields: [userId], references: [id])
+  userId       String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  permissionId String
+  granted      Boolean
+
+  @@unique([userId, permissionId])
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  INVITED
+}
+
+model User {
+  id              String     @id @default(cuid())
+  name            String
+  email           String     @unique
+  passwordHash    String
+  phone           String?    // required if SMS 2FA is enabled for this user
+  role            Role       @relation(fields: [roleId], references: [id])
+  roleId          String
+  status          UserStatus @default(INVITED)
+  twoFactorMethod TwoFactorMethod @default(EMAIL)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  lastLoginAt     DateTime?
+
+  permissionOverrides UserPermission[]
+  loginHistory        LoginHistory[]
+  otpCodes            OtpCode[]
+  activityLogs        ActivityLog[]
+  notifications       Notification[]
+}
+
+enum TwoFactorMethod {
+  EMAIL
+  SMS
+}
+
+// Short-lived one-time codes for the 2FA step. Never store the raw code —
+// only its hash — and always set an expiry.
+model OtpCode {
+  id         String   @id @default(cuid())
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  codeHash   String
+  method     TwoFactorMethod
+  destination String  // masked email or phone this code was sent to
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+}
+
+// Security & audit: login attempts, success or failure, per §30.
+model LoginHistory {
+  id        String   @id @default(cuid())
+  user      User?    @relation(fields: [userId], references: [id])
+  userId    String?
+  emailTried String
+  success   Boolean
+  reason    String?  // e.g. "bad_password", "otp_failed", "account_suspended"
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+}
+
+// Append-only. Application code must never expose a delete for this model —
+// see §26 "Employees should not be able to delete historical activity."
+model ActivityLog {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  entityType String  // "user" | "trade" | ... (trade-related entities land here from Phase 3+)
+  entityId   String?
+  action     String
+  detail     String?
+  createdAt  DateTime @default(now())
+}
+
+// Single-row-per-key configuration: branding, numbering sequences, feature
+// flags. Keeps business-configurable values out of source code, per §35.
+model CompanySetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// Per-year, per-prefix numbering sequences (AMT-TC-2026-00001, AMT-BI-2026-00001, ...).
+// A dedicated counter table avoids gaps/races that come from counting rows.
+model NumberSequence {
+  prefix       String   @id // e.g. "AMT-TC-2026"
+  lastNumber   Int      @default(0)
+  updatedAt    DateTime @updatedAt
+}
+
+// ============================================================================
+// PHASE 2 — Master data: Buyers, Sellers, Products, Quality spec templates
+// ============================================================================
+
+enum PartyStatus {
+  ACTIVE
+  INACTIVE
+  BLACKLISTED
+  UNDER_REVIEW
+}
+
+model Buyer {
+  id                String      @id @default(cuid())
+  buyerCode         String      @unique // e.g. BYR-00001
+  companyName       String
+  legalCompanyName  String
+  address           String?
+  country           String
+  city              String?
+  contactPerson     String?
+  designation       String?
+  email             String?
+  phone             String?
+  whatsapp          String?
+  website           String?
+  taxVatNumber      String?
+  registrationNumber String?
+  importLicence     String?
+  importPermitDetails String?
+  bankDetails       String?     // free text for Phase 2; structure further if needed
+  paymentTerms      String?
+  creditTerms       String?
+  notes             String?
+  status            PartyStatus @default(ACTIVE)
+  createdBy         String
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  documents         PartyDocument[]
+  trades            Trade[]
+  confirmations     TradeConfirmation[]
+  opportunities     TradeOpportunity[]
+}
+
+model Seller {
+  id                String      @id @default(cuid())
+  sellerCode        String      @unique // e.g. SEL-00001
+  legalCompanyName  String
+  address           String?
+  country           String
+  contactPerson     String?
+  email             String?
+  phone             String?
+  website           String?
+  registrationDetails String?
+  taxDetails        String?
+  bankDetails       String?
+  productsSupplied  String?
+  paymentTerms      String?
+  notes             String?
+  status            PartyStatus @default(ACTIVE)
+  createdBy         String
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  documents         PartyDocument[]
+  trades            Trade[]
+  confirmations     TradeConfirmation[]
+  opportunities     TradeOpportunity[]
+}
+
+// Generic uploaded-document metadata for a Buyer or Seller record. Actual
+// file bytes are NOT stored by this app — see Document model below and the
+// README "File storage" section for why, and what to wire in.
+model PartyDocument {
+  id        String   @id @default(cuid())
+  buyer     Buyer?   @relation(fields: [buyerId], references: [id])
+  buyerId   String?
+  seller    Seller?  @relation(fields: [sellerId], references: [id])
+  sellerId  String?
+  label     String
+  fileUrl   String   // external URL once file storage is wired in
+  uploadedBy String
+  uploadedAt DateTime @default(now())
+}
+
+model Product {
+  id                String   @id @default(cuid())
+  name              String   @unique
+  commodityCategory String
+  originTypical     String?
+  unitOfMeasure     String   @default("MT")
+  defaultDocuments  String?  // JSON array of document type strings
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  specTemplates     ProductSpecTemplate[]
+  trades            Trade[]
+  confirmations     TradeConfirmation[]
+  opportunities     TradeOpportunity[]
+}
+
+// Reusable quality-parameter template per product (e.g. Moisture, Oil, FFA)
+// so a trader building a new confirmation doesn't retype the same spec
+// rows every time — they can start from the template and adjust.
+model ProductSpecTemplate {
+  id         String  @id @default(cuid())
+  product    Product @relation(fields: [productId], references: [id])
+  productId  String
+  parameter  String
+  requirement String
+  unit       String?
+  minMax     String? // "min" | "max" | "base" | null
+  notes      String?
+  sortOrder  Int     @default(0)
+}
+
+// ============================================================================
+// PHASE 3 — Trade Opportunities, Trade Confirmations, structured quality
+// ============================================================================
+
+enum OpportunityStage {
+  ENQUIRY
+  NEGOTIATING
+  CONFIRMED
+  LOST
+}
+
+model TradeOpportunity {
+  id        String           @id @default(cuid())
+  buyer     Buyer?           @relation(fields: [buyerId], references: [id])
+  buyerId   String?
+  seller    Seller?          @relation(fields: [sellerId], references: [id])
+  sellerId  String?
+  product   Product?         @relation(fields: [productId], references: [id])
+  productId String?
+  stage     OpportunityStage @default(ENQUIRY)
+  notes     String?
+  createdBy String
+  createdAt DateTime         @default(now())
+}
+
+enum ConfirmationStatus {
+  DRAFT
+  ISSUED
+  SUPERSEDED // replaced by a later revision
+}
+
+model TradeConfirmation {
+  id                String   @id @default(cuid())
+  confirmationNo    String   @unique // AMT-TC-2026-00001
+  revisionNo        Int      @default(1)
+  trade             Trade?   @relation("ConfirmationHistory", fields: [tradeId], references: [id])
+  tradeId           String?
+  buyer             Buyer    @relation(fields: [buyerId], references: [id])
+  buyerId           String
+  seller            Seller   @relation(fields: [sellerId], references: [id])
+  sellerId          String
+  product           Product  @relation(fields: [productId], references: [id])
+  productId         String
+
+  confirmationDate  DateTime @default(now())
+  crop              String?
+  origin            String?
+  shipmentPeriod    String?
+  packing           String?
+  destination       String?
+  incoterm          String
+  price             Float
+  currency          String   @default("USD")
+  priceBasis        String?
+  quantity           Float
+  quantityUnit       String  @default("MT")
+  quantityTolerance  String?
+  paymentTerms       String
+  documentsRequired  String? // JSON array of strings
+  brokerName         String?
+  brokerageTerms     String?
+  arbitration        String?
+  remarks            String?
+  specialClauses     String?
+
+  qualityFreeText    String? // free-text special quality clause, in addition to structured rows below
+  status             ConfirmationStatus @default(DRAFT)
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  qualitySpecs QualitySpecItem[]
+
+  @@index([tradeId])
+}
+
+model QualitySpecItem {
+  id              String            @id @default(cuid())
+  confirmation    TradeConfirmation @relation(fields: [confirmationId], references: [id], onDelete: Cascade)
+  confirmationId  String
+  parameter       String
+  requirement     String
+  unit            String?
+  minMax          String?
+  notes           String?
+  sortOrder       Int               @default(0)
+}
+
+// ============================================================================
+// PHASE 4 — Trade lifecycle, contracts, shipment, containers, documents
+// ============================================================================
+
+enum TradeStatus {
+  DRAFT
+  CONFIRMATION_PENDING
+  CONFIRMED
+  SELLER_CONTRACT_RECEIVED
+  BUYER_PO_RECEIVED
+  SHIPMENT_PLANNING
+  BOOKED
+  LOADED
+  IN_TRANSIT
+  ARRIVED
+  DOCUMENTS_COMPLETED
+  PAYMENT_COMPLETED
+  BROKERAGE_COMPLETED
+  TRADE_COMPLETED
+  CANCELLED
+  ON_HOLD
+  DISPUTED
+}
+
+model Trade {
+  id                String      @id @default(cuid())
+  buyer             Buyer       @relation(fields: [buyerId], references: [id])
+  buyerId           String
+  seller            Seller      @relation(fields: [sellerId], references: [id])
+  sellerId          String
+  product           Product     @relation(fields: [productId], references: [id])
+  productId         String
+
+  // Confidential — see view_margin permission. Never returned by any API
+  // response to a caller without that permission (enforced in src/lib/margin.ts).
+  sellerPrice       Float?
+  buyerPrice        Float?
+
+  currency          String      @default("USD")
+  incoterm          String
+  destination       String?
+  quantity          Float
+  quantityUnit      String      @default("MT")
+  status            TradeStatus @default(DRAFT)
+
+  sellerContractNo   String?
+  sellerContractDate DateTime?
+  buyerPoNo          String?     // optional, per spec §13
+  buyerPoDate        DateTime?
+
+  currentConfirmationNo String? // denormalized for quick display/search
+
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  confirmations TradeConfirmation[] @relation("ConfirmationHistory")
+  shipments     Shipment[]
+  documents     Document[]
+  payments      Payment[]
+  brokerage     Brokerage?
+  disputes      Dispute[]
+  emails        Email[]
+
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+enum ShipmentStatus {
+  BOOKING_CONFIRMED
+  CONTAINER_RELEASED
+  GATE_IN
+  LOADED
+  VESSEL_DEPARTED
+  TRANSHIPMENT
+  VESSEL_ARRIVED
+  DISCHARGED
+  CUSTOMS
+  DELIVERED
+}
+
+model Shipment {
+  id                String         @id @default(cuid())
+  trade             Trade          @relation(fields: [tradeId], references: [id])
+  tradeId           String
+  shippingLine      String?
+  vesselName        String?
+  voyageNumber      String?
+  bookingNumber     String?
+  blNumber          String?
+  blDate            DateTime?
+  portOfLoading     String?
+  transhipmentPort  String?
+  portOfDischarge   String?
+  etd               DateTime?
+  eta               DateTime?
+  actualDeparture   DateTime?
+  actualArrival     DateTime?
+  freeDays          Int?
+  demurrage         Float?
+  detention         Float?
+  status            ShipmentStatus @default(BOOKING_CONFIRMED)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  containers Container[]
+}
+
+model Container {
+  id           String   @id @default(cuid())
+  shipment     Shipment @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  shipmentId   String
+  containerNo  String
+  size         String?  // "20ft" | "40ft"
+  sealNo       String?
+}
+
+enum DocumentType {
+  TRADE_CONFIRMATION
+  SELLER_CONTRACT
+  BUYER_PO
+  COMMERCIAL_INVOICE
+  PACKING_LIST
+  BILL_OF_LADING
+  CERTIFICATE_OF_ORIGIN
+  PHYTOSANITARY
+  FUMIGATION
+  HEALTH_CERTIFICATE
+  QUALITY_CERTIFICATE
+  WEIGHT_CERTIFICATE
+  NON_GMO_CERTIFICATE
+  INSURANCE
+  IMPORT_PERMIT
+  OTHER
+}
+
+enum DocumentStatus {
+  PENDING
+  UPLOADED
+  APPROVED
+  REJECTED
+}
+
+// File bytes are NOT stored in this database. `fileUrl` points at external
+// storage (Vercel Blob / S3 / etc.) — see README "File storage" for what
+// needs to be wired in before uploads work for real.
+model Document {
+  id         String         @id @default(cuid())
+  trade      Trade          @relation(fields: [tradeId], references: [id])
+  tradeId    String
+  docType    DocumentType
+  version    Int            @default(1)
+  fileUrl    String?
+  fileName   String?
+  status     DocumentStatus @default(PENDING)
+  uploadedBy String?
+  uploadedAt DateTime?
+  createdAt  DateTime       @default(now())
+}
+
+// ============================================================================
+// PHASE 5 — Payments, Brokerage
+// ============================================================================
+
+enum PaymentParty {
+  BUYER
+  SELLER
+}
+
+enum PaymentType {
+  ADVANCE
+  BALANCE
+  OTHER
+}
+
+model Payment {
+  id           String       @id @default(cuid())
+  trade        Trade        @relation(fields: [tradeId], references: [id])
+  tradeId      String
+  party        PaymentParty
+  paymentType  PaymentType
+  percentage   Float?
+  amount       Float
+  dueDate      DateTime?
+  received     Boolean      @default(false)
+  receivedDate DateTime?
+  reference    String?
+  recordedBy   String
+  createdAt    DateTime     @default(now())
+}
+
+enum BrokerageType {
+  PER_MT
+  PERCENTAGE
+  FIXED
+}
+
+enum BrokeragePaymentStatus {
+  PENDING
+  INVOICED
+  PAID
+}
+
+model Brokerage {
+  id                String                  @id @default(cuid())
+  trade             Trade                   @relation(fields: [tradeId], references: [id])
+  tradeId           String                  @unique
+  brokerName        String
+  brokerageType     BrokerageType
+  rate              Float                   // USD/MT, % , or fixed amount depending on brokerageType
+  currency          String                  @default("USD")
+  calculatedAmount  Float?
+  status            BrokeragePaymentStatus  @default(PENDING)
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  invoices BrokerageInvoice[]
+}
+
+model BrokerageInvoice {
+  id              String                 @id @default(cuid())
+  brokerage       Brokerage              @relation(fields: [brokerageId], references: [id])
+  brokerageId     String
+  invoiceNo       String                 @unique // AMT-BI-2026-00001
+  invoiceDate     DateTime               @default(now())
+  amount          Float
+  paymentStatus   BrokeragePaymentStatus @default(INVOICED)
+  paymentReceivedDate DateTime?
+  createdBy       String
+  createdAt       DateTime               @default(now())
+}
+
+// ============================================================================
+// PHASE 6 — Disputes
+// ============================================================================
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  BUYER_RESPONSE_PENDING
+  SELLER_RESPONSE_PENDING
+  NEGOTIATION
+  SETTLED
+  REJECTED
+  CLOSED
+}
+
+model Dispute {
+  id                String        @id @default(cuid())
+  trade             Trade         @relation(fields: [tradeId], references: [id])
+  tradeId           String
+  disputeType       String
+  dateRaised        DateTime      @default(now())
+  description       String
+  claimAmount       Float?
+  debitNoteUrl      String?
+  creditNoteUrl     String?
+  responsibleUserId String?
+  sellerResponse    String?
+  buyerResponse     String?
+  settlementAmount  Float?
+  settlementPct     Float?
+  resolution        String?
+  status            DisputeStatus @default(OPEN)
+  createdBy         String
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+}
+
+// ============================================================================
+// PHASE 8 — Email (history + templates). Sending is NOT wired to a live
+// provider — see src/lib/notify.ts and README "Wiring real email & SMS".
+// ============================================================================
+
+model Email {
+  id         String   @id @default(cuid())
+  trade      Trade?   @relation(fields: [tradeId], references: [id])
+  tradeId    String?
+  sender     String
+  recipient  String
+  cc         String?
+  subject    String
+  body       String
+  sentByUserId String
+  sentAt     DateTime @default(now())
+}
+
+model EmailTemplate {
+  id              String @id @default(cuid())
+  name            String @unique
+  subjectTemplate String
+  bodyTemplate    String
+}
+
+// ============================================================================
+// Notifications — schema only in this build. No generation logic or bell/UI
+// exists yet (e.g. "payment overdue" or "document pending" notifications
+// aren't created automatically). Flagging honestly rather than building a
+// UI on top of an event system that doesn't exist yet — a reasonable Phase
+// 9+ addition once the trigger points (overdue payments, upcoming
+// shipments, etc.) are prioritized.
+// ============================================================================
+model Notification {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  message   String
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}

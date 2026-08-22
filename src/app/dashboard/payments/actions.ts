@@ -1,0 +1,54 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { prisma } from "@/lib/db";
+import { requirePermission, logActivity } from "@/lib/margin";
+
+function str(formData: FormData, key: string): string | undefined {
+  const v = formData.get(key);
+  return v ? String(v) : undefined;
+}
+
+export async function recordPayment(tradeId: string, formData: FormData) {
+  const session = await requirePermission("record_payment");
+
+  const amount = Number(formData.get("amount"));
+  const payment = await prisma.payment.create({
+    data: {
+      tradeId,
+      party: String(formData.get("party")) as any,
+      paymentType: String(formData.get("paymentType")) as any,
+      percentage: formData.get("percentage") ? Number(formData.get("percentage")) : undefined,
+      amount,
+      dueDate: formData.get("dueDate") ? new Date(String(formData.get("dueDate"))) : undefined,
+      received: formData.get("received") === "on",
+      receivedDate:
+        formData.get("received") === "on" && formData.get("receivedDate")
+          ? new Date(String(formData.get("receivedDate")))
+          : undefined,
+      reference: str(formData, "reference"),
+      recordedBy: session.userId,
+    },
+  });
+
+  await logActivity({
+    userId: session.userId,
+    entityType: "payment",
+    entityId: payment.id,
+    action: "recorded",
+    detail: `${payment.party} ${payment.paymentType} payment of ${amount} recorded for trade ${tradeId}`,
+  });
+
+  revalidatePath(`/dashboard/trades/${tradeId}`);
+  revalidatePath("/dashboard/payments");
+}
+
+/** Derives an overall payment status label for a trade from its recorded payments. */
+export function computeOverallPaymentStatus(payments: { received: boolean; amount: number }[]): string {
+  if (payments.length === 0) return "PENDING";
+  const allReceived = payments.every((p) => p.received);
+  const anyReceived = payments.some((p) => p.received);
+  if (allReceived) return "PAID";
+  if (anyReceived) return "PARTIALLY_PAID";
+  return "PENDING";
+}

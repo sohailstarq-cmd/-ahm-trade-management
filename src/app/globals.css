@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand-navy: #03224f;
+  --brand-gold: #c0902f;
+  --brand-green: #156428;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-page {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+}
