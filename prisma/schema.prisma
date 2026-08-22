@@ -13,7 +13,7 @@ datasource db {
   // Local dev defaults to SQLite so this runs with zero external setup.
   // For production, switch provider to "postgresql" and set DATABASE_URL
   // to a real Postgres connection string — see README "Going to production".
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
